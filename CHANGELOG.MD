@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 **Warning:** Features marked as *alpha* may change or be removed in a future release without notice. Use with caution.
 
+## [0.4.0] - 2025-07-30
+
+### Changed
+
+The WebPub data the go-toolkit parses and provides has been updated to more closely match the latest WebPub spec. Pay close attention to these changes if you depend on the WebPub output in reading systems/libraries that use an older version of the spec!
+
 ## [0.3.0] - 2025-07-12
 
 ### Changed
@@ -42,4 +48,4 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- Created this project based on the command-line utilities from the [Go toolkit](https://github.com/readium/go-toolkit)
+- Created this project based on the command-line utilities from the [https://github.com/readium/go-toolkit](Go Toolkit)
