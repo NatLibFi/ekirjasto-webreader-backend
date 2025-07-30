@@ -168,10 +168,7 @@ Examples:
 			InferPageCount:     inferPageCountFlag,
 			InferIgnoredImages: ignoreImagesHashes,
 			OnCreatePublication: func(builder *pub.Builder) error {
-				// TODO: use improved services functions when implemented
-				builder.ServicesBuilder.Remove(pub.PositionsService_Name, nil)
-				builder.ServicesBuilder.Remove(pub.ContentService_Name, nil)
-				builder.ServicesBuilder.Remove(pub.GuidedNavigationService_Name, nil)
+				builder.ServicesBuilder.RemoveExcept()
 				return nil
 			},
 		}).Open(
