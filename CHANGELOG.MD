@@ -4,12 +4,20 @@ All notable changes to this project will be documented in this file.
 
 **Warning:** Features marked as *alpha* may change or be removed in a future release without notice. Use with caution.
 
-## [0.4.1] - 2025-08-17
+## [0.5.0] - 2025-09-19
 
 ### Added
 
 - The `--http-host-whitelist` flag has been added to the serve command, to which a list of hosts can be passed. If at least one host is passed, access to streamed HTTP/HTTPS publications will be restricted to the provided hosts. A host like example.com can be further restricted to a "folder", such as example.com/the/path/
 - The `--http-unsafe-requests` flag has been added. It disabled restrictions that are enabled by default to prevent access to private IP addresses (such as internal infrastructure or localhost), and should be used with caution
+
+### Fixed
+
+- The software version displayed when using the `--version` command was incorrect due to a bug. Thanks @tefkah for the fix
+
+### Changed
+
+- Dependencies were updated
 
 ## [0.4.0] - 2025-07-30
 
