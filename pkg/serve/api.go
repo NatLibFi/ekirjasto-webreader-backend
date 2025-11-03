@@ -3,11 +3,9 @@ package serve
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -29,43 +27,8 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
-type demoListItem struct {
-	Filename string `json:"filename"`
-	Path     string `json:"path"`
-}
-
-// TODO: replace with OPDS or something better
-func (s *Server) demoList(w http.ResponseWriter, req *http.Request) {
-	if s.remote.LocalDirectory == "" {
-		slog.Warn("demo publication list requested, but no local directory configured")
-		w.WriteHeader(404)
-		return
-	}
-
-	fi, err := os.ReadDir(s.remote.LocalDirectory)
-	if err != nil {
-		slog.Error("failed reading publications directory", "error", err)
-		w.WriteHeader(500)
-		return
-	}
-	files := make([]demoListItem, len(fi))
-	for i, f := range fi {
-		files[i] = demoListItem{
-			Filename: f.Name(),
-			Path:     base64.RawURLEncoding.EncodeToString([]byte(f.Name())),
-		}
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", s.config.JSONIndent)
-	enc.Encode(files)
-}
-
 func (s *Server) getPublication(ctx context.Context, filename string) (*pub.Publication, bool, time.Time, error) {
-	fpath, err := base64.RawURLEncoding.DecodeString(filename)
-	if err != nil {
-		return nil, false, time.Time{}, err
-	}
-	loc, err := url.URLFromString(string(fpath))
+	loc, err := url.URLFromString(filename)
 	if err != nil {
 		return nil, false, time.Time{}, errors.Wrap(err, "failed creating URL from filepath")
 	}
@@ -142,7 +105,7 @@ func (s *Server) getPublication(ctx context.Context, filename string) (*pub.Publ
 
 func (s *Server) getManifest(w http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
-	filename := vars["path"]
+	filename := req.Context().Value(ContextPathKey).(string)
 
 	// Load the publication
 	publication, _, cachedAt, err := s.getPublication(req.Context(), filename)
@@ -211,7 +174,7 @@ func (s *Server) getManifest(w http.ResponseWriter, req *http.Request) {
 
 func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	filename := vars["path"]
+	filename := r.Context().Value(ContextPathKey).(string)
 
 	// Load the publication
 	publication, remote, _, err := s.getPublication(r.Context(), filename)
@@ -306,6 +269,10 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 
 	cres, ok := res.(fetcher.CompressedResource)
 	normalResponse := func() {
+		if r.Method == http.MethodHead {
+			return
+		}
+
 		if remote {
 			var bin []byte
 			bin, rerr = res.Read(r.Context(), start, end)
@@ -326,6 +293,10 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("content-encoding", "deflate")
 				w.Header().Set("content-length", strconv.FormatInt(cres.CompressedLength(r.Context()), 10))
 			}
+			if r.Method == http.MethodHead {
+				headers()
+				return
+			}
 			if remote {
 				var bin []byte
 				bin, rerr = cres.ReadCompressed(r.Context())
@@ -344,6 +315,10 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 			headers := func() {
 				w.Header().Set("content-encoding", "gzip")
 				w.Header().Set("content-length", strconv.FormatInt(cres.CompressedLength(r.Context())+archive.GzipWrapperLength, 10))
+			}
+			if r.Method == http.MethodHead {
+				headers()
+				return
 			}
 			if remote {
 				var bin []byte
