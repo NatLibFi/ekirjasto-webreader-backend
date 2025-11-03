@@ -25,7 +25,7 @@ RUN git describe --tags --always
 # Run goreleaser
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
-    GOOS=$TARGETOS GOARCH=$TARGETARCH GOAMD64=v3 GOARM=7 \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH GOAMD64=v2 GOARM=7 \
     goreleaser build --single-target --id readium --skip=validate $(case "$NO_SNAPSHOT" in yes|true|1) ;; *) echo "--snapshot";; esac) --output ./readium
 
 # Run tests
