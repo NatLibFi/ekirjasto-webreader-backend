@@ -16,6 +16,7 @@ All notable changes to this project will be documented in this file.
 - The GOAMD64 value for release builds has been changed from `v3` to `v2`. The discussion regarding this is [here](https://github.com/readium/cli/issues/78). This allows execution of the built binaries on older x64 CPUs
 - The HTTP client configuration used for streaming of remote publications has been changed to require, at minimum, TLSv1.2 for HTTPS connections
 - The serve command's routes are now prefixed with `/webpub`. So `<domain>/<path>/manifest.json` is now `<domain>/webpub/<path>/manifest.json`
+- Go and third-party dependencies updated
 
 ### Removed
 
