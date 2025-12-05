@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 **Warning:** Features marked as *alpha* may change or be removed in a future release without notice. Use with caution.
 
+## [0.6.2] - 2025-12-04
+
+### Fixed
+
+- Problems with [remote streaming of compressed multimedia](https://github.com/readium/cli/issues/27) have been addressed. This was due to a combination a bug in the implementation of partial resource reading, as well as special logic to make the kinds of requests browsers send for audio/video stream lead to smaller reads of the original resource. It's better just not to compressed multimedia in an EPUB though
+- This update also fixes the issues with image inspection (failure to decode images) that occured due the bug in the partial resource reading, which was triggered by image decoding libraries reading fragments of the image files
+
+### Changed
+
+- Go and third-party dependencies updated
+
 ## [0.6.1] - 2025-11-03
 
 ### Fixed
