@@ -3,17 +3,15 @@ package serve
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"os"
 	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
-	"strings"
 	"syscall"
+	"time"
 
 	"github.com/gorilla/mux"
 	httprange "github.com/gotd/contrib/http_range"
@@ -29,45 +27,10 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
-type demoListItem struct {
-	Filename string `json:"filename"`
-	Path     string `json:"path"`
-}
-
-// TODO: replace with OPDS or something better
-func (s *Server) demoList(w http.ResponseWriter, req *http.Request) {
-	if s.remote.LocalDirectory == "" {
-		slog.Warn("demo publication list requested, but no local directory configured")
-		w.WriteHeader(404)
-		return
-	}
-
-	fi, err := os.ReadDir(s.remote.LocalDirectory)
+func (s *Server) getPublication(ctx context.Context, filename string) (*pub.Publication, bool, time.Time, error) {
+	loc, err := url.URLFromString(filename)
 	if err != nil {
-		slog.Error("failed reading publications directory", "error", err)
-		w.WriteHeader(500)
-		return
-	}
-	files := make([]demoListItem, len(fi))
-	for i, f := range fi {
-		files[i] = demoListItem{
-			Filename: f.Name(),
-			Path:     base64.RawURLEncoding.EncodeToString([]byte(f.Name())),
-		}
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", s.config.JSONIndent)
-	enc.Encode(files)
-}
-
-func (s *Server) getPublication(ctx context.Context, filename string) (*pub.Publication, bool, error) {
-	fpath, err := base64.RawURLEncoding.DecodeString(filename)
-	if err != nil {
-		return nil, false, err
-	}
-	loc, err := url.URLFromString(string(fpath))
-	if err != nil {
-		return nil, false, errors.Wrap(err, "failed creating URL from filepath")
+		return nil, false, time.Time{}, errors.Wrap(err, "failed creating URL from filepath")
 	}
 	u := url.BaseFile.Resolve(loc).(url.AbsoluteURL) // Turn relative filepaths into file:/// URLs
 
@@ -78,54 +41,55 @@ func (s *Server) getPublication(ctx context.Context, filename string) (*pub.Publ
 		config := streamer.Config{
 			InferA11yMetadata: s.config.InferA11yMetadata,
 			HttpClient:        s.remote.HTTP,
+			AddServiceLinks:   true,
 		}
 		if !s.remote.AcceptsScheme(u.Scheme()) {
-			return nil, remote, errors.New("unacceptable scheme " + u.Scheme().String())
+			return nil, remote, time.Time{}, errors.New("unacceptable scheme " + u.Scheme().String())
 		}
 		if u.IsFile() {
 			path, err := url.FromFilepath(filepath.Join(s.remote.LocalDirectory, path.Clean(u.Path())))
 			if err != nil {
-				return nil, remote, errors.Wrap(err, "failed creating URL from filepath")
+				return nil, remote, time.Time{}, errors.Wrap(err, "failed creating URL from filepath")
 			}
 
 			pub, err = streamer.New(config).Open(ctx, asset.File(path), "")
 			if err != nil {
-				return nil, remote, errors.Wrap(err, "failed opening "+path.String())
+				return nil, remote, time.Time{}, errors.Wrap(err, "failed opening "+path.String())
 			}
 		} else {
 			switch u.Scheme() {
 			case url.SchemeS3:
 				remote = true
 				if s.remote.S3 == nil {
-					return nil, remote, errors.New("S3 client not configured")
+					return nil, remote, time.Time{}, errors.New("S3 client not configured")
 				}
 				config.ArchiveFactory = archive.NewS3ArchiveFactory(s.remote.S3, archive.NewDefaultRemoteArchiveConfig())
 				pub, err = streamer.New(config).Open(ctx, asset.S3(s.remote.S3, u), "")
 				if err != nil {
-					return nil, remote, errors.Wrap(err, "failed opening "+u.String())
+					return nil, remote, time.Time{}, errors.Wrap(err, "failed opening "+u.String())
 				}
 			case url.SchemeGS:
 				remote = true
 				if s.remote.GCS == nil {
-					return nil, remote, errors.New("GCS client not configured")
+					return nil, remote, time.Time{}, errors.New("GCS client not configured")
 				}
 				config.ArchiveFactory = archive.NewGCSArchiveFactory(s.remote.GCS, archive.NewDefaultRemoteArchiveConfig())
 				pub, err = streamer.New(config).Open(ctx, asset.GCS(s.remote.GCS, u), "")
 				if err != nil {
-					return nil, remote, errors.Wrap(err, "failed opening "+u.String())
+					return nil, remote, time.Time{}, errors.Wrap(err, "failed opening "+u.String())
 				}
 			case url.SchemeHTTP, url.SchemeHTTPS:
 				remote = true
 				if s.remote.HTTP == nil {
-					return nil, remote, errors.New("HTTP client not configured")
+					return nil, remote, time.Time{}, errors.New("HTTP client not configured")
 				}
 				config.ArchiveFactory = archive.NewHTTPArchiveFactory(s.remote.HTTP, archive.NewDefaultRemoteArchiveConfig())
 				pub, err = streamer.New(config).Open(ctx, asset.HTTP(s.remote.HTTP, u), "")
 				if err != nil {
-					return nil, remote, errors.Wrap(err, "failed opening "+u.String())
+					return nil, remote, time.Time{}, errors.Wrap(err, "failed opening "+u.String())
 				}
 			default:
-				return nil, remote, errors.New("unsupported scheme " + u.Scheme().String())
+				return nil, remote, time.Time{}, errors.New("unsupported scheme " + u.Scheme().String())
 			}
 		}
 
@@ -133,18 +97,18 @@ func (s *Server) getPublication(ctx context.Context, filename string) (*pub.Publ
 		encPub := cache.EncapsulatePublication(pub, remote)
 		s.lfu.Set(u.String(), encPub)
 
-		return encPub.Publication, remote, nil
+		return encPub.Publication, remote, encPub.CachedAt, nil
 	}
 	cp := dat.(*cache.CachedPublication)
-	return cp.Publication, cp.Remote, nil
+	return cp.Publication, cp.Remote, cp.CachedAt, nil
 }
 
 func (s *Server) getManifest(w http.ResponseWriter, req *http.Request) {
 	vars := mux.Vars(req)
-	filename := vars["path"]
+	filename := req.Context().Value(ContextPathKey).(string)
 
 	// Load the publication
-	publication, _, err := s.getPublication(req.Context(), filename)
+	publication, _, cachedAt, err := s.getPublication(req.Context(), filename)
 	if err != nil {
 		slog.Error("failed opening publication", "error", err)
 		w.WriteHeader(500)
@@ -181,7 +145,12 @@ func (s *Server) getManifest(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Marshal the manifest
-	j, err := json.Marshal(publication.Manifest.ToMap(selfLink))
+	var j []byte
+	if s.config.JSONIndent == "" {
+		j, err = json.Marshal(publication.Manifest.ToMap(selfLink))
+	} else {
+		j, err = json.MarshalIndent(publication.Manifest.ToMap(selfLink), "", s.config.JSONIndent)
+	}
 	if err != nil {
 		slog.Error("failed marshalling manifest JSON", "error", err)
 		w.WriteHeader(500)
@@ -191,63 +160,24 @@ func (s *Server) getManifest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Indent JSON
-	var identJSON bytes.Buffer
-	if s.config.JSONIndent == "" {
-		_, err = identJSON.Write(j)
-		if err != nil {
-			slog.Error("failed writing manifest JSON to buffer", "error", err)
-			w.WriteHeader(500)
-			if s.config.Debug {
-				w.Write([]byte(err.Error()))
-			}
-			return
-		}
-	} else {
-		err = json.Indent(&identJSON, j, "", s.config.JSONIndent)
-		if err != nil {
-			slog.Error("failed indenting manifest JSON", "error", err)
-			w.WriteHeader(500)
-			if s.config.Debug {
-				w.Write([]byte(err.Error()))
-			}
-			return
-		}
-	}
-
 	// Add headers
 	w.Header().Set("content-type", conformsTo.String()+"; charset=utf-8")
 	w.Header().Set("cache-control", "private, must-revalidate")
 	w.Header().Set("access-control-allow-origin", "*") // TODO: provide options?
 
 	// Etag based on hash of the manifest bytes
-	etag := `"` + strconv.FormatUint(xxh3.Hash(identJSON.Bytes()), 36) + `"`
+	etag := `"` + strconv.FormatUint(xxh3.Hash(j), 36) + `"`
 	w.Header().Set("Etag", etag)
-	if match := req.Header.Get("If-None-Match"); match != "" {
-		if strings.Contains(match, etag) {
-			w.WriteHeader(http.StatusNotModified)
-			return
-		}
-	}
 
-	// Write response body
-	_, err = identJSON.WriteTo(w)
-	if err != nil {
-		slog.Error("failed writing manifest JSON to response writer", "error", err)
-		w.WriteHeader(500)
-		if s.config.Debug {
-			w.Write([]byte(err.Error()))
-		}
-		return
-	}
+	http.ServeContent(w, req, "manifest.json", cachedAt, bytes.NewReader(j))
 }
 
 func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
-	filename := vars["path"]
+	filename := r.Context().Value(ContextPathKey).(string)
 
 	// Load the publication
-	publication, remote, err := s.getPublication(r.Context(), filename)
+	publication, remote, _, err := s.getPublication(r.Context(), filename)
 	if err != nil {
 		slog.Error("failed opening publication", "error", err)
 		w.WriteHeader(500)
@@ -333,10 +263,16 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	}
 	if w.Header().Get("content-range") != "" {
 		w.WriteHeader(http.StatusPartialContent)
+	} else {
+		w.Header().Set("accept-ranges", "bytes")
 	}
 
 	cres, ok := res.(fetcher.CompressedResource)
 	normalResponse := func() {
+		if r.Method == http.MethodHead {
+			return
+		}
+
 		if remote {
 			var bin []byte
 			bin, rerr = res.Read(r.Context(), start, end)
@@ -357,6 +293,10 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("content-encoding", "deflate")
 				w.Header().Set("content-length", strconv.FormatInt(cres.CompressedLength(r.Context()), 10))
 			}
+			if r.Method == http.MethodHead {
+				headers()
+				return
+			}
 			if remote {
 				var bin []byte
 				bin, rerr = cres.ReadCompressed(r.Context())
@@ -375,6 +315,10 @@ func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 			headers := func() {
 				w.Header().Set("content-encoding", "gzip")
 				w.Header().Set("content-length", strconv.FormatInt(cres.CompressedLength(r.Context())+archive.GzipWrapperLength, 10))
+			}
+			if r.Method == http.MethodHead {
+				headers()
+				return
 			}
 			if remote {
 				var bin []byte
