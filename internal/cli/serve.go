@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -13,6 +15,8 @@ import (
 
 	"log/slog"
 
+	nurl "net/url"
+
 	"cloud.google.com/go/storage"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -20,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/pkg/errors"
 	"github.com/readium/cli/pkg/serve"
+	"github.com/readium/cli/pkg/serve/auth"
 	"github.com/readium/cli/pkg/serve/client"
 	"github.com/readium/go-toolkit/pkg/streamer"
 	"github.com/readium/go-toolkit/pkg/util/url"
@@ -37,6 +42,11 @@ var schemeFlag []string
 
 var fileDirectoryFlag string
 
+var mode string
+
+var jwtSharedSecret string
+var jwksURL string
+
 // Cloud-related flags
 var s3EndpointFlag string
 var s3RegionFlag string
@@ -44,6 +54,8 @@ var s3AccessKeyFlag string
 var s3SecretKeyFlag string
 var s3UsePathStyleFlag bool
 
+var httpHostWhitelistFlag []string
+var httpUnsafeRequestsFlag bool
 var httpAuthorizationFlag string
 
 var remoteArchiveTimeoutFlag uint32
@@ -53,10 +65,10 @@ var remoteArchiveCacheAll uint32
 
 var serveCmd = &cobra.Command{
 	Use:   "serve",
-	Short: "Start a local HTTP server, serving a specified directory of publications",
-	Long: `Start a local HTTP server, serving a specified directory of publications.
+	Short: "Start a local HTTP server, serving publications locally or remotely",
+	Long: `Start a local HTTP server, serving publications locally or remotely.
 
-This command will start an HTTP serve listening by default on 'localhost:15080',
+This command will start an HTTP server listening by default on 'localhost:15080',
 serving all compatible files (EPUB, PDF, CBZ, etc.) available from the enabled
 access schemes (file, http, https, s3, gs, or a local path if file scheme is enabled)
 as Readium Web Publications. To get started, the manifest can be accessed from
@@ -64,13 +76,9 @@ as Readium Web Publications. To get started, the manifest can be accessed from
 This file serves as the entry point and contains metadata and links to the rest
 of the files that can be accessed for the publication.
 
-If local file access is enabled, the server also exposes a '/list.json' endpoint that, 
-for debugging purposes, returns a list of all the publications found in the directory
-along with their encoded paths. This will be replaced by an OPDS 2 feed (or similar)
-in a future release.
-
-Note: Take caution before exposing this server on the internet. It does not
-implement any authentication, and may have more access to files than expected.`,
+Authentication can be enabled using the -m flag, which replaces the  encoded path
+with a JWT. Before exposing this server publicly, consider using this flag to secure
+access to publications and prevent abuse or unauthorized access.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			// For users migrating from previous versions of the CLI
@@ -182,7 +190,21 @@ implement any authentication, and may have more access to files than expected.`,
 		}
 
 		// HTTP/HTTPS
-		remote.HTTP, err = client.NewHTTPClient(httpAuthorizationFlag)
+		urlWhitelist := make([]*nurl.URL, len(httpHostWhitelistFlag))
+		for i, rawURL := range httpHostWhitelistFlag {
+			parsedURL, err := nurl.Parse(rawURL)
+			if err != nil {
+				return fmt.Errorf("invalid URL in whitelist: %s: %w", rawURL, err)
+			}
+			if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+				return fmt.Errorf("whitelisted URL %s must have http or https scheme", rawURL)
+			}
+			if parsedURL.Host == "" {
+				return fmt.Errorf("whitelisted URL %s must have a host", rawURL)
+			}
+			urlWhitelist[i] = parsedURL
+		}
+		remote.HTTP, err = client.NewHTTPClient(httpAuthorizationFlag, urlWhitelist, httpUnsafeRequestsFlag)
 		if err != nil {
 			slog.Warn("HTTP client creation failed, HTTP support will be disabled", "error", err)
 		}
@@ -195,17 +217,58 @@ implement any authentication, and may have more access to files than expected.`,
 		remote.Config.Timeout = time.Duration(remoteArchiveTimeoutFlag) * time.Second
 		remote.Config.CacheAllThreshold = int64(remoteArchiveCacheAll)
 
+		var authProvider auth.AuthProvider
+		switch mode {
+		case "base64":
+			authProvider = auth.NewB64EncodedAuthProvider()
+			slog.Info("Operating in open access mode with base64url encoding (insecure)")
+		case "jwt":
+			var sharedSecret []byte
+			if jwtSharedSecret == "" {
+				// Auto-generate shared secret
+				var rawSecret [32]byte
+				_, err := rand.Reader.Read(rawSecret[:])
+				if err != nil {
+					return fmt.Errorf("failed to generate random shared secret: %w", err)
+				}
+				sharedSecret = rawSecret[:]
+				slog.Info("Operating in HS256 JWT access mode", "secret", hex.EncodeToString(sharedSecret))
+			} else {
+				sharedSecret, err = hex.DecodeString(jwtSharedSecret)
+				if err != nil {
+					return fmt.Errorf("failed to decode hex-encoded JWT shared secret: %w", err)
+				}
+				slog.Info("Operating in HS256 JWT access mode", "secret", "<jwt-shared-secret flag>")
+			}
+			authProvider, err = auth.NewJWTAuthProvider(sharedSecret)
+			if err != nil {
+				return fmt.Errorf("failed creating JWT auth provider: %w", err)
+			}
+		case "jwks":
+			if jwksURL == "" {
+				return fmt.Errorf("jwks-url must be specified in jwks mode")
+			}
+			slog.Info("Operating in JWKS JWT access mode", "jwks_url", jwksURL)
+			authProvider, err = auth.NewJWKSAuthProvider(context.Background(), remote.HTTP, jwksURL)
+			if err != nil {
+				return fmt.Errorf("failed creating JWKS auth provider: %w", err)
+			}
+		default:
+			return fmt.Errorf("invalid access mode %q, acceptable values: base64, jwt, jwks", mode)
+		}
+
 		// Create server
 		pubServer := serve.NewServer(serve.ServerConfig{
 			Debug:             debugFlag,
 			JSONIndent:        indentFlag,
 			InferA11yMetadata: streamer.InferA11yMetadata(inferA11yFlag),
+			Auth:              authProvider,
 		}, remote)
 
 		bind := fmt.Sprintf("%s:%d", bindAddressFlag, bindPortFlag)
 		httpServer := &http.Server{
 			ReadTimeout:    10 * time.Second,
-			WriteTimeout:   10 * time.Second,
+			WriteTimeout:   600 * time.Second, // 5 minutes for server to respond with resource
 			MaxHeaderBytes: 1 << 20,
 			Addr:           bind,
 			Handler:        pubServer.Routes(),
@@ -230,6 +293,10 @@ func init() {
 	serveCmd.Flags().StringVarP(&indentFlag, "indent", "i", "", "Indentation used to pretty-print JSON files")
 	serveCmd.Flags().Var(&inferA11yFlag, "infer-a11y", "Infer accessibility metadata: no, merged, split")
 	serveCmd.Flags().BoolVarP(&debugFlag, "debug", "d", false, "Enable debug mode")
+	serveCmd.Flags().StringVarP(&mode, "mode", "m", "base64", "Access mode: base64 (default, base64url-encoded paths), jwt (JWT auth with a shared secret), jwks (JWT auth with keys in a JWKS)")
+
+	serveCmd.Flags().StringVar(&jwtSharedSecret, "jwt-shared-secret", "", "Hex-encoded shared secret used for HS256 JWT signature validation. If omitted, but JWT auth is enabled, the secret is auto-generated and logged (debug) at runtime")
+	serveCmd.Flags().StringVar(&jwksURL, "jwks-url", "", "URL to a JWKS (JSON Web Key Set) used for JWT signature validation when in 'jwks' mode")
 
 	serveCmd.Flags().StringVar(&fileDirectoryFlag, "file-directory", "", "Local directory path to serve publications from")
 
@@ -239,6 +306,8 @@ func init() {
 	serveCmd.Flags().StringVar(&s3SecretKeyFlag, "s3-secret-key", "", "S3 secret key")
 	serveCmd.Flags().BoolVar(&s3UsePathStyleFlag, "s3-use-path-style", false, "Use S3 path style buckets (default is to use virtual hosts)")
 
+	serveCmd.Flags().StringSliceVar(&httpHostWhitelistFlag, "http-host-whitelist", []string{}, "Whitelist of HTTP hosts/paths to allow for remote HTTP requests (e.g. 'http://1.1.1.1', 'https://na1.storage.example.com/the/path'). If omitted, anything that resolves to a public IP is allowed.")
+	serveCmd.Flags().BoolVar(&httpUnsafeRequestsFlag, "http-unsafe-requests", false, "Allow potentially unsafe HTTP requests to private IP addresses (e.g. localhost). Enable only if you completely control the requests made to the server, otherwise this can be dangerous")
 	serveCmd.Flags().StringVar(&httpAuthorizationFlag, "http-authorization", "", "HTTP authorization header value (e.g. 'Bearer <token>' or 'Basic <base64-credentials>')")
 
 	serveCmd.Flags().Uint32Var(&remoteArchiveTimeoutFlag, "remote-archive-timeout", 60, "Timeout for remote archive requests (in seconds)")

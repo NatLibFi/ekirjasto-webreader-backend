@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1-bookworm@sha256:29d97266c1d341b7424e2f5085440b74654ae0b61ecdba206bc12d6264844e21 AS builder
+FROM --platform=$BUILDPLATFORM golang:1-bookworm@sha256:ee420c17fa013f71eca6b35c3547b854c838d4f26056a34eb6171bba5bf8ece4 AS builder
 ARG BUILDARCH TARGETOS TARGETARCH
 ARG NO_SNAPSHOT=false
 
@@ -25,7 +25,7 @@ RUN git describe --tags --always
 # Run goreleaser
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
-    GOOS=$TARGETOS GOARCH=$TARGETARCH GOAMD64=v3 GOARM=7 \
+    GOOS=$TARGETOS GOARCH=$TARGETARCH GOAMD64=v2 GOARM=7 \
     goreleaser build --single-target --id readium --skip=validate $(case "$NO_SNAPSHOT" in yes|true|1) ;; *) echo "--snapshot";; esac) --output ./readium
 
 # Run tests
